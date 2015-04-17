@@ -52,53 +52,59 @@ public abstract class MemoryCacheProducer<K, T> implements Producer<CloseableRef
     final K cacheKey = getCacheKey(producerContext.getImageRequest());
     CloseableReference<T> cachedReference = mMemoryCache.get(cacheKey, null);
     if (cachedReference != null) {
-      boolean shouldStartNextProducer = shouldStartNextProducer(cachedReference);
-      if (!shouldStartNextProducer) {
+      boolean isLast = isResultFinal(cachedReference);
+      if (isLast) {
         listener.onProducerFinishWithSuccess(
             requestId,
             getProducerName(),
             listener.requiresExtraMap(requestId) ?
                 ImmutableMap.of(CACHED_VALUE_FOUND, "true") :
                 null);
+        consumer.onProgressUpdate(1f);
       }
-      consumer.onNewResult(cachedReference, !shouldStartNextProducer);
+      consumer.onNewResult(cachedReference, isLast);
       cachedReference.close();
-      if (!shouldStartNextProducer) {
+      if (isLast) {
         return;
       }
+    }
+
+    if (producerContext.getLowestPermittedRequestLevel().getValue() >=
+        getProducerRequestLevel().getValue()) {
+      listener.onProducerFinishWithSuccess(
+          requestId,
+          getProducerName(),
+          listener.requiresExtraMap(requestId) ?
+              ImmutableMap.of(CACHED_VALUE_FOUND, "false") :
+              null);
+      consumer.onNewResult(null, true);
+      return;
     }
 
     Consumer<CloseableReference<T>> consumerOfNextProducer;
     if (!shouldCacheReturnedValues()) {
       consumerOfNextProducer = consumer;
     } else {
-      consumerOfNextProducer = new BaseConsumer<CloseableReference<T>>() {
-        @Override
-        public void onNewResultImpl(
-            CloseableReference<T> newResult, boolean isLast) {
-          CloseableReference<T> cachedResult = null;
-          if (newResult != null && shouldCacheResult(newResult, cacheKey, isLast)) {
-            cachedResult = mMemoryCache.cache(cacheKey, newResult);
-          }
-
-          if (cachedResult != null) {
-            consumer.onNewResult(cachedResult, isLast);
-            cachedResult.close();
-          } else {
-            consumer.onNewResult(newResult, isLast);
-          }
-        }
-
-        @Override
-        public void onFailureImpl(Throwable t) {
-          consumer.onFailure(t);
-        }
-
-        @Override
-        protected void onCancellationImpl() {
-          consumer.onCancellation();
-        }
-      };
+      consumerOfNextProducer =
+          new DelegatingConsumer<CloseableReference<T>, CloseableReference<T>>(consumer) {
+            @Override
+            public void onNewResultImpl(CloseableReference<T> newResult, boolean isLast) {
+              CloseableReference<T> cachedResult = null;
+              if (newResult != null && shouldCacheResult(newResult, cacheKey, isLast)) {
+                cachedResult = mMemoryCache.cache(cacheKey, newResult);
+              }
+              try {
+                CloseableReference<T> result = (cachedResult != null) ? cachedResult : newResult;
+                if (CloseableReference.isValid(result) && isLast) {
+                  getConsumer().onProgressUpdate(1f);
+                }
+                getConsumer().onNewResult(result, isLast);
+              } finally {
+                // we only own cachedResult, newResult is owned by the caller
+                CloseableReference.closeSafely(cachedResult);
+              }
+            }
+          };
     }
 
     listener.onProducerFinishWithSuccess(
@@ -110,7 +116,9 @@ public abstract class MemoryCacheProducer<K, T> implements Producer<CloseableRef
 
   protected abstract K getCacheKey(ImageRequest imageRequest);
 
-  protected abstract boolean shouldStartNextProducer(CloseableReference<T> cachedResultFound);
+  protected abstract boolean isResultFinal(CloseableReference<T> cachedResultFound);
+
+  protected abstract ImageRequest.RequestLevel getProducerRequestLevel();
 
   protected abstract boolean shouldCacheReturnedValues();
 

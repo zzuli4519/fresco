@@ -9,7 +9,7 @@
 
 package com.facebook.imagepipeline.core;
 
-import java.util.ArrayList;
+import java.io.File;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -17,7 +17,6 @@ import java.util.Set;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.graphics.Rect;
-import android.os.Build;
 
 import com.facebook.cache.disk.DiskCacheConfig;
 import com.facebook.common.internal.Preconditions;
@@ -48,9 +47,9 @@ import com.facebook.imagepipeline.animated.base.AnimatedDrawableBackend;
 import com.facebook.imagepipeline.animated.impl.AnimatedDrawableBackendProvider;
 import com.facebook.imagepipeline.memory.PoolConfig;
 import com.facebook.imagepipeline.memory.PoolFactory;
-import com.facebook.imagepipeline.producers.HttpURLConnectionNetworkFetchProducer;
-import com.facebook.imagepipeline.producers.NetworkFetchProducer;
 import com.facebook.imagepipeline.listener.RequestListener;
+import com.facebook.imagepipeline.producers.HttpUrlConnectionNetworkFetcher;
+import com.facebook.imagepipeline.producers.NetworkFetcher;
 
 /**
  * Master configuration class for the image pipeline library.
@@ -83,7 +82,7 @@ public class ImagePipelineConfig {
   private final Supplier<Boolean> mIsPrefetchEnabledSupplier;
   private final DiskCacheConfig mMainDiskCacheConfig;
   private final MemoryTrimmableRegistry mMemoryTrimmableRegistry;
-  private final NetworkFetchProducer mNetworkFetchProducer;
+  private final NetworkFetcher mNetworkFetcher;
   private final PoolFactory mPoolFactory;
   private final ProgressiveJpegConfig mProgressiveJpegConfig;
   private final Set<RequestListener> mRequestListeners;
@@ -137,7 +136,7 @@ public class ImagePipelineConfig {
             builder.mPoolFactory;
     mProgressiveJpegConfig =
         builder.mProgressiveJpegConfig == null ?
-            getDefaultProgressiveJpegConfig() :
+            new SimpleProgressiveJpegConfig() :
             builder.mProgressiveJpegConfig;
     mRequestListeners =
         builder.mRequestListeners == null ?
@@ -157,14 +156,10 @@ public class ImagePipelineConfig {
         return new AnimatedDrawableBackendImpl(mAnimatedDrawableUtil, imageResult, bounds);
       }
     };
-    mAnimatedImageFactory = builder.mAnimatedImageFactory == null ?
-        new AnimatedImageFactory(animatedDrawableBackendProvider) :
-        builder.mAnimatedImageFactory;
-
     GingerbreadBitmapFactory factoryGingerbread = new GingerbreadBitmapFactory();
     DalvikBitmapFactory factoryICS = new DalvikBitmapFactory(
         new EmptyJpegGenerator(mPoolFactory.getPooledByteBufferFactory()),
-        mPoolFactory.getSingleByteArrayPool());
+        mPoolFactory.getSharedByteArray());
     ArtBitmapFactory factoryLollipop =
         new ArtBitmapFactory(mPoolFactory.getBitmapPool());
     mPlatformBitmapFactory =
@@ -173,32 +168,34 @@ public class ImagePipelineConfig {
             factoryICS,
             factoryLollipop);
 
+    mAnimatedImageFactory = builder.mAnimatedImageFactory == null ?
+        new AnimatedImageFactory(animatedDrawableBackendProvider, mPlatformBitmapFactory) :
+        builder.mAnimatedImageFactory;
+
     mImageDecoder =
         builder.mImageDecoder == null ?
             new ImageDecoder(mAnimatedImageFactory, mPlatformBitmapFactory) :
             builder.mImageDecoder;
-    mNetworkFetchProducer =
-        builder.mNetworkFetchProducer == null ?
-            new HttpURLConnectionNetworkFetchProducer(
-                mPoolFactory.getPooledByteBufferFactory(),
-                mPoolFactory.getCommonByteArrayPool()) :
-            builder.mNetworkFetchProducer;
+    mNetworkFetcher =
+        builder.mNetworkFetcher == null ?
+            new HttpUrlConnectionNetworkFetcher() :
+            builder.mNetworkFetcher;
   }
 
-  private static DiskCacheConfig getDefaultMainDiskCacheConfig(Context context) {
+  private static DiskCacheConfig getDefaultMainDiskCacheConfig(final Context context) {
     return DiskCacheConfig.newBuilder()
-        .setBaseDirectoryPath(context.getApplicationContext().getCacheDir())
+        .setBaseDirectoryPathSupplier(
+            new Supplier<File>() {
+              @Override
+              public File get() {
+                return context.getApplicationContext().getCacheDir();
+              }
+            })
         .setBaseDirectoryName("image_cache")
         .setMaxCacheSize(40 * ByteConstants.MB)
         .setMaxCacheSizeOnLowDiskSpace(10 * ByteConstants.MB)
         .setMaxCacheSizeOnVeryLowDiskSpace(2 * ByteConstants.MB)
         .build();
-  }
-
-  private static ProgressiveJpegConfig getDefaultProgressiveJpegConfig() {
-    // By default, don't return images progressively at all.
-    return new SimpleProgressiveJpegConfig(
-        Collections.unmodifiableList(new ArrayList<Integer>()), 0);
   }
 
   public Supplier<MemoryCacheParams> getBitmapMemoryCacheParamsSupplier() {
@@ -241,8 +238,8 @@ public class ImagePipelineConfig {
     return mMemoryTrimmableRegistry;
   }
 
-  public NetworkFetchProducer getNetworkFetchProducer() {
-    return mNetworkFetchProducer;
+  public NetworkFetcher getNetworkFetcher() {
+    return mNetworkFetcher;
   }
 
   public PoolFactory getPoolFactory() {
@@ -285,7 +282,7 @@ public class ImagePipelineConfig {
     private Supplier<Boolean> mIsPrefetchEnabledSupplier;
     private DiskCacheConfig mMainDiskCacheConfig;
     private MemoryTrimmableRegistry mMemoryTrimmableRegistry;
-    private NetworkFetchProducer mNetworkFetchProducer;
+    private NetworkFetcher mNetworkFetcher;
     private PoolFactory mPoolFactory;
     private ProgressiveJpegConfig mProgressiveJpegConfig;
     private Set<RequestListener> mRequestListeners;
@@ -352,8 +349,8 @@ public class ImagePipelineConfig {
       return this;
     }
 
-    public Builder setNetworkFetchProducer(NetworkFetchProducer networkFetchProducer) {
-      mNetworkFetchProducer = networkFetchProducer;
+    public Builder setNetworkFetcher(NetworkFetcher networkFetcher) {
+      mNetworkFetcher = networkFetcher;
       return this;
     }
 

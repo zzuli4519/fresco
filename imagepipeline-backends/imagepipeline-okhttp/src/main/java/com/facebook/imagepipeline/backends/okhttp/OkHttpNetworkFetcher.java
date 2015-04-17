@@ -9,67 +9,55 @@
 
 package com.facebook.imagepipeline.backends.okhttp;
 
-import java.io.IOException;
-
 import android.net.Uri;
+import android.os.Looper;
 
 import com.facebook.common.logging.FLog;
 import com.facebook.common.references.CloseableReference;
-import com.facebook.imagepipeline.memory.ByteArrayPool;
 import com.facebook.imagepipeline.memory.PooledByteBuffer;
-import com.facebook.imagepipeline.memory.PooledByteBufferFactory;
+import com.facebook.imagepipeline.producers.BaseNetworkFetcher;
 import com.facebook.imagepipeline.producers.BaseProducerContextCallbacks;
 import com.facebook.imagepipeline.producers.Consumer;
-import com.facebook.imagepipeline.producers.NfpRequestState;
-import com.facebook.imagepipeline.producers.NetworkFetchProducer;
+import com.facebook.imagepipeline.producers.FetchState;
 import com.facebook.imagepipeline.producers.ProducerContext;
-
-import com.squareup.okhttp.Call;
-import com.squareup.okhttp.Callback;
 import com.squareup.okhttp.CacheControl;
+import com.squareup.okhttp.Call;
 import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.ResponseBody;
 
+import java.io.IOException;
+import java.util.concurrent.Executor;
+
 /**
- * Network fetch producer using OkHttp as a backend.
- *
- * <p> OkHttpNetworkFetchProducer supports request cancellation. This feature is enabled
- * via {@code cancellable} constructor parameter.
+ * Network fetcher that uses OkHttp as a backend.
  */
-public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestState> {
+public class OkHttpNetworkFetcher extends BaseNetworkFetcher<FetchState> {
 
   private static final String TAG = "OkHttpNetworkFetchProducer";
 
   private final OkHttpClient mOkHttpClient;
-  private final boolean mCancellable;
+
+  private Executor mCancellationExecutor;
 
   /**
    * @param okHttpClient client to use
-   * @param cancellable whether to allow cancellation of submitted requests
-   * @param pooledByteBufferFactory pooled byte buffer factory
-   * @param byteArrayPool pool for stream input/ouptut buffering
    */
-  public OkHttpNetworkFetchProducer(
-      OkHttpClient okHttpClient,
-      boolean cancellable,
-      PooledByteBufferFactory pooledByteBufferFactory,
-      ByteArrayPool byteArrayPool) {
-    super(pooledByteBufferFactory, byteArrayPool);
+  public OkHttpNetworkFetcher(OkHttpClient okHttpClient) {
     mOkHttpClient = okHttpClient;
-    mCancellable = cancellable;
+    mCancellationExecutor = okHttpClient.getDispatcher().getExecutorService();
   }
 
   @Override
-  protected NfpRequestState newRequestState(
+  public FetchState createFetchState(
       Consumer<CloseableReference<PooledByteBuffer>> consumer,
       ProducerContext context) {
-    return new NfpRequestState(consumer, context);
+    return new FetchState(consumer, context);
   }
 
   @Override
-  protected void fetchImage(final NfpRequestState requestState) {
+  public void fetch(final FetchState requestState, final Callback callback) {
     final Uri uri = requestState.getUri();
     final Request request = new Request.Builder()
         .cacheControl(new CacheControl.Builder().noStore().build())
@@ -78,18 +66,24 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
         .build();
     final Call call = mOkHttpClient.newCall(request);
 
-    if (mCancellable) {
-      requestState.getContext().addCallbacks(
-          new BaseProducerContextCallbacks() {
-            @Override
-            public void onCancellationRequested() {
+    requestState.getContext().addCallbacks(
+        new BaseProducerContextCallbacks() {
+          @Override
+          public void onCancellationRequested() {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
               call.cancel();
+            } else {
+              mCancellationExecutor.execute(new Runnable() {
+                @Override public void run() {
+                  call.cancel();
+                }
+              });
             }
-          });
-    }
+          }
+        });
 
     call.enqueue(
-        new Callback() {
+        new com.squareup.okhttp.Callback() {
           @Override
           public void onResponse(Response response) {
             final ResponseBody body = response.body();
@@ -98,9 +92,9 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
               if (contentLength < 0) {
                 contentLength = 0;
               }
-              processResult(requestState, body.byteStream(), (int) contentLength, false);
+              callback.onResponse(body.byteStream(), (int) contentLength);
             } catch (IOException ioe) {
-              handleException(call, requestState, ioe);
+              handleException(call, ioe, callback);
             } finally {
               try {
                 body.close();
@@ -112,7 +106,7 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
 
           @Override
           public void onFailure(final Request request, final IOException e) {
-            handleException(call, requestState, e);
+            handleException(call, e, callback);
           }
         });
   }
@@ -124,14 +118,11 @@ public class OkHttpNetworkFetchProducer extends NetworkFetchProducer<NfpRequestS
    * after request cancellation, then the exception is interpreted as successful cancellation
    * and onCancellation is called. Otherwise onFailure is called.
    */
-  private void handleException(
-      final Call call,
-      final NfpRequestState requestState,
-      final IOException ioe) {
+  private void handleException(final Call call, final IOException ioe, final Callback callback) {
     if (call.isCanceled()) {
-      onCancellation(requestState, null);
+      callback.onCancellation();
     } else {
-      onFailure(requestState, ioe, null);
+      callback.onFailure(ioe);
     }
   }
 }

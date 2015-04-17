@@ -9,8 +9,6 @@
 
 package com.facebook.imagepipeline.bitmaps;
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
 import java.util.ConcurrentModificationException;
 
 import android.annotation.TargetApi;
@@ -19,13 +17,15 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 
 import com.facebook.common.references.CloseableReference;
+import com.facebook.common.references.ResourceReleaser;
 import com.facebook.common.soloader.SoLoaderShim;
 import com.facebook.imagepipeline.memory.BitmapCounter;
 import com.facebook.imagepipeline.memory.BitmapCounterProvider;
 import com.facebook.imagepipeline.memory.PooledByteBuffer;
-import com.facebook.imagepipeline.memory.SingleByteArrayPool;
+import com.facebook.imagepipeline.memory.SharedByteArray;
 import com.facebook.imagepipeline.nativecode.Bitmaps;
 import com.facebook.imagepipeline.testing.MockBitmapFactory;
+import com.facebook.imagepipeline.testing.TrivialPooledByteBuffer;
 import com.facebook.testing.robolectric.v2.WithTestDefaultsRunner;
 
 import org.junit.Before;
@@ -63,18 +63,19 @@ public class DalvikBitmapFactoryTest {
   private static final int MAX_BITMAP_SIZE =
       MAX_BITMAP_COUNT * MockBitmapFactory.DEFAULT_BITMAP_SIZE;
 
-  private SingleByteArrayPool mSingleByteArrayPool;
+  private SharedByteArray mSharedByteArray;
 
   private DalvikBitmapFactory mDalvikBitmapFactory;
   private CloseableReference<PooledByteBuffer> mInputImageRef;
   private byte[] mInputBuf;
   private byte[] mDecodeBuf;
+  private CloseableReference<byte[]> mDecodeBufRef;
   private Bitmap mBitmap;
   private BitmapCounter mBitmapCounter;
 
   @Before
   public void setUp() {
-    mSingleByteArrayPool = mock(SingleByteArrayPool.class);
+    mSharedByteArray = mock(SharedByteArray.class);
 
     mBitmap = MockBitmapFactory.create();
     mBitmapCounter = new BitmapCounter(MAX_BITMAP_COUNT, MAX_BITMAP_SIZE);
@@ -94,13 +95,14 @@ public class DalvikBitmapFactoryTest {
     PooledByteBuffer input = new TrivialPooledByteBuffer(mInputBuf, POINTER);
     mInputImageRef = CloseableReference.of(input);
 
-    mDecodeBuf = new byte[mInputBuf.length];
-    when(mSingleByteArrayPool.get(Integer.valueOf(mDecodeBuf.length))).thenReturn(mDecodeBuf);
+    mDecodeBuf = new byte[LENGTH + 2];
+    mDecodeBufRef = CloseableReference.of(mDecodeBuf, mock(ResourceReleaser.class));
+    when(mSharedByteArray.get(Integer.valueOf(LENGTH))).thenReturn(mDecodeBufRef);
 
     mockStatic(Bitmaps.class);
     mDalvikBitmapFactory = new DalvikBitmapFactory(
         null,
-        mSingleByteArrayPool);
+        mSharedByteArray);
   }
 
   @Test
@@ -114,10 +116,10 @@ public class DalvikBitmapFactoryTest {
 
   @Test
   public void testDecodeJpeg_incomplete() {
-    when(mSingleByteArrayPool.get(IMAGE_SIZE + 2)).thenReturn(mDecodeBuf);
+    when(mSharedByteArray.get(IMAGE_SIZE + 2)).thenReturn(mDecodeBufRef);
     CloseableReference<Bitmap> result =
         mDalvikBitmapFactory.decodeJPEGFromPooledByteBuffer(mInputImageRef, IMAGE_SIZE);
-    verify(mSingleByteArrayPool).get(IMAGE_SIZE + 2);
+    verify(mSharedByteArray).get(IMAGE_SIZE + 2);
     verifyStatic();
     BitmapFactory.decodeByteArray(
         same(mDecodeBuf),
@@ -167,17 +169,17 @@ public class DalvikBitmapFactoryTest {
     assertEquals(MockBitmapFactory.DEFAULT_BITMAP_SIZE, mBitmapCounter.getSize());
     verifyStatic();
     Bitmaps.pinBitmap(mBitmap);
-    verify(mSingleByteArrayPool).release(mDecodeBuf);
+    assertFalse(CloseableReference.isValid(mDecodeBufRef));
   }
 
   private void setUpJpegDecode() {
     mInputBuf[3] = (byte) 0xff;
     mInputBuf[4] = (byte) 0xd9;
-    when(mSingleByteArrayPool.get(IMAGE_SIZE + 2)).thenReturn(mDecodeBuf);
+    when(mSharedByteArray.get(IMAGE_SIZE + 2)).thenReturn(mDecodeBufRef);
   }
 
   private void verifyDecodesJpeg(CloseableReference<Bitmap> result) {
-    verify(mSingleByteArrayPool).get(IMAGE_SIZE + 2);
+    verify(mSharedByteArray).get(IMAGE_SIZE + 2);
     verifyStatic();
     BitmapFactory.decodeByteArray(
         same(mDecodeBuf),
@@ -202,53 +204,6 @@ public class DalvikBitmapFactoryTest {
       return options.inDither &&
           options.inPreferredConfig == Bitmaps.BITMAP_CONFIG &&
           options.inPurgeable;
-    }
-  }
-
-  /**
-   * A trivial implementation of {@link PooledByteBuffer}
-   */
-  private static class TrivialPooledByteBuffer implements PooledByteBuffer {
-    private byte[] mBuf;
-    private long mNativePtr;
-
-    public TrivialPooledByteBuffer(byte[] buf) {
-      this(buf, 0L);
-    }
-
-    public TrivialPooledByteBuffer(byte[] buf, long nativePtr) {
-      mBuf = buf;
-      mNativePtr = nativePtr;
-    }
-
-    @Override
-    public int size() {
-      return isClosed() ? -1 : mBuf.length;
-    }
-
-    @Override
-    public InputStream getStream() {
-      return new ByteArrayInputStream(mBuf);
-    }
-
-    @Override
-    public byte read(int offset) {
-      return mBuf[offset];
-    }
-
-    @Override
-    public long getNativePtr() {
-      return mNativePtr;
-    }
-
-    @Override
-    public boolean isClosed() {
-      return mBuf == null;
-    }
-
-    @Override
-    public void close() {
-      mBuf = null;
     }
   }
 }

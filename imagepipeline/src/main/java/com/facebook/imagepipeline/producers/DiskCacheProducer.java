@@ -58,11 +58,16 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
   public void produceResults(
       final Consumer<CloseableReference<PooledByteBuffer>> consumer,
       final ProducerContext producerContext) {
+    ImageRequest imageRequest = producerContext.getImageRequest();
+    if (!imageRequest.isDiskCacheEnabled()) {
+      maybeStartNextProducer(consumer, consumer, producerContext);
+      return;
+    }
+
     final ProducerListener listener = producerContext.getListener();
     final String requestId = producerContext.getId();
     listener.onProducerStart(requestId, PRODUCER_NAME);
 
-    ImageRequest imageRequest = producerContext.getImageRequest();
     final CacheKey cacheKey = mCacheKeyFactory.getEncodedCacheKey(imageRequest);
     final BufferedDiskCache cache =
         imageRequest.getImageType() == ImageRequest.ImageType.SMALL
@@ -79,7 +84,8 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
               consumer.onCancellation();
             } else if (task.isFaulted()) {
               listener.onProducerFinishWithFailure(requestId, PRODUCER_NAME, task.getError(), null);
-              mNextProducer.produceResults(
+              maybeStartNextProducer(
+                  consumer,
                   new DiskCacheConsumer(consumer, cache, cacheKey),
                   producerContext);
             } else {
@@ -89,6 +95,7 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
                     requestId,
                     PRODUCER_NAME,
                     getExtraMap(listener, requestId, true));
+                consumer.onProgressUpdate(1);
                 consumer.onNewResult(cachedReference, true);
                 cachedReference.close();
               } else {
@@ -96,7 +103,8 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
                     requestId,
                     PRODUCER_NAME,
                     getExtraMap(listener, requestId, false));
-                mNextProducer.produceResults(
+                maybeStartNextProducer(
+                    consumer,
                     new DiskCacheConsumer(consumer, cache, cacheKey),
                     producerContext);
               }
@@ -110,6 +118,19 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
         cache.get(cacheKey, isCancelled);
     diskCacheLookupTask.continueWith(continuation);
     subscribeTaskForRequestCancellation(isCancelled, producerContext);
+  }
+
+  private void maybeStartNextProducer(
+      Consumer<CloseableReference<PooledByteBuffer>> consumerOfDiskCacheProducer,
+      Consumer<CloseableReference<PooledByteBuffer>> consumerOfNextProducer,
+      ProducerContext producerContext) {
+    if (producerContext.getLowestPermittedRequestLevel().getValue() >=
+        ImageRequest.RequestLevel.DISK_CACHE.getValue()) {
+      consumerOfDiskCacheProducer.onNewResult(null, true);
+      return;
+    }
+
+    mNextProducer.produceResults(consumerOfNextProducer, producerContext);
   }
 
   @VisibleForTesting
@@ -141,8 +162,10 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
    * <p>The consumer puts the last result received into disk cache, and passes all results (success
    * or failure) down to the next consumer.
    */
-  private class DiskCacheConsumer extends BaseConsumer<CloseableReference<PooledByteBuffer>> {
-    private final Consumer<CloseableReference<PooledByteBuffer>> mConsumer;
+  private class DiskCacheConsumer extends DelegatingConsumer<
+          CloseableReference<PooledByteBuffer>,
+          CloseableReference<PooledByteBuffer>> {
+
     private final BufferedDiskCache mCache;
     private final CacheKey mCacheKey;
 
@@ -150,7 +173,7 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
         final Consumer<CloseableReference<PooledByteBuffer>> consumer,
         final BufferedDiskCache cache,
         final CacheKey cacheKey) {
-      mConsumer = consumer;
+      super(consumer);
       mCache = cache;
       mCacheKey = cacheKey;
     }
@@ -160,17 +183,7 @@ public class DiskCacheProducer implements Producer<CloseableReference<PooledByte
       if (newResult != null && isLast) {
         mCache.put(mCacheKey, newResult);
       }
-      mConsumer.onNewResult(newResult, isLast);
-    }
-
-    @Override
-    public void onFailureImpl(Throwable t) {
-      mConsumer.onFailure(t);
-    }
-
-    @Override
-    public void onCancellationImpl() {
-      mConsumer.onCancellation();
+      getConsumer().onNewResult(newResult, isLast);
     }
   }
 }

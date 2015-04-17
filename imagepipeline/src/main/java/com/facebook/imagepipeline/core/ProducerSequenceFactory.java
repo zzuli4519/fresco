@@ -36,7 +36,7 @@ import com.facebook.imagepipeline.producers.LocalExifThumbnailProducer;
 import com.facebook.imagepipeline.producers.LocalFileFetchProducer;
 import com.facebook.imagepipeline.producers.LocalResourceFetchProducer;
 import com.facebook.imagepipeline.producers.LocalVideoThumbnailProducer;
-import com.facebook.imagepipeline.producers.NetworkFetchProducer;
+import com.facebook.imagepipeline.producers.NetworkFetcher;
 import com.facebook.imagepipeline.producers.PostprocessorProducer;
 import com.facebook.imagepipeline.producers.Producer;
 import com.facebook.imagepipeline.producers.ResizeAndRotateProducer;
@@ -49,11 +49,10 @@ public class ProducerSequenceFactory {
   private static final int MAX_SIMULTANEOUS_FILE_FETCH_AND_RESIZE = 5;
 
   private final ProducerFactory mProducerFactory;
-  private final NetworkFetchProducer mNetworkFetchProducer;
+  private final NetworkFetcher mNetworkFetcher;
   private final boolean mResizeAndRotateEnabledForNetwork;
 
   // Saved sequences
-  @VisibleForTesting Producer<CloseableReference<CloseableImage>> mBitmapCacheGetOnlySequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mNetworkFetchSequence;
   @VisibleForTesting Producer<CloseableReference<PooledByteBuffer>>
       mBackgroundNetworkFetchToEncodedMemorySequence;
@@ -74,10 +73,10 @@ public class ProducerSequenceFactory {
 
   public ProducerSequenceFactory(
       ProducerFactory producerFactory,
-      NetworkFetchProducer networkFetchProducer,
+      NetworkFetcher networkFetcher,
       boolean resizeAndRotateEnabledForNetwork) {
     mProducerFactory = producerFactory;
-    mNetworkFetchProducer = networkFetchProducer;
+    mNetworkFetcher = networkFetcher;
     mResizeAndRotateEnabledForNetwork = resizeAndRotateEnabledForNetwork;
     mPostprocessorSequences = Maps.newHashMap();
     mCloseableImagePrefetchSequences = Maps.newHashMap();
@@ -113,23 +112,8 @@ public class ProducerSequenceFactory {
     Preconditions.checkNotNull(imageRequest);
     Preconditions.checkArgument(UriUtil.isNetworkUri(imageRequest.getSourceUri()));
     Preconditions.checkArgument(
-        imageRequest.getLowestPermittedRequestLevel() ==
-            ImageRequest.RequestLevel.FULL_FETCH);
-  }
-
-  /**
-   * Returns a sequence that can be used for a request that just requires a bitmap cache lookup.
-   *
-   * <p> Sequence is: bitmap cache get -> null producer
-   * @return the sequence that should be used to process the request.
-   */
-  public synchronized Producer<CloseableReference<CloseableImage>> getBitmapCacheGetOnlySequence() {
-    if (mBitmapCacheGetOnlySequence == null) {
-      mBitmapCacheGetOnlySequence =
-          mProducerFactory.newBitmapMemoryCacheGetProducer(
-              mProducerFactory.<CloseableReference<CloseableImage>>newNullProducer());
-    }
-    return mBitmapCacheGetOnlySequence;
+        imageRequest.getLowestPermittedRequestLevel().getValue() <=
+            ImageRequest.RequestLevel.ENCODED_MEMORY_CACHE.getValue());
   }
 
   /**
@@ -163,20 +147,9 @@ public class ProducerSequenceFactory {
   private Producer<CloseableReference<CloseableImage>> getBasicDecodedImageSequence(
       ImageRequest imageRequest) {
     Preconditions.checkNotNull(imageRequest);
-    ImageRequest.RequestLevel lowestPermittedRequestLevel =
-        imageRequest.getLowestPermittedRequestLevel();
-    Preconditions.checkState(
-        lowestPermittedRequestLevel.equals(ImageRequest.RequestLevel.FULL_FETCH) ||
-            lowestPermittedRequestLevel.equals(
-                ImageRequest.RequestLevel.BITMAP_MEMORY_CACHE),
-        "Only support bitmap memory cache or full fetch at present, request level is %s ",
-        lowestPermittedRequestLevel);
-
-    if (lowestPermittedRequestLevel.equals(ImageRequest.RequestLevel.BITMAP_MEMORY_CACHE)) {
-      return getBitmapCacheGetOnlySequence();
-    }
 
     Uri uri = imageRequest.getSourceUri();
+    Preconditions.checkNotNull(uri, "Uri is null.");
     if (UriUtil.isNetworkUri(uri)) {
       return getNetworkFetchSequence();
     } else if (UriUtil.isLocalFileUri(uri)) {
@@ -192,8 +165,11 @@ public class ProducerSequenceFactory {
     } else if (UriUtil.isLocalResourceUri(uri)) {
       return getLocalResourceFetchSequence();
     } else {
-      throw new RuntimeException(
-          "Unsupported image type! Uri is: " + uri.toString().substring(0, 30));
+      String uriString = uri.toString();
+      if (uriString.length() > 30) {
+        uriString = uriString.substring(0, 30) + "...";
+      }
+      throw new RuntimeException("Unsupported uri scheme! Uri is: " + uriString);
     }
   }
 
@@ -244,8 +220,8 @@ public class ProducerSequenceFactory {
   private synchronized Producer<CloseableReference<PooledByteBuffer>>
       getCommonNetworkFetchToEncodedMemorySequence() {
     if (mCommonNetworkFetchToEncodedMemorySequence == null) {
-      mCommonNetworkFetchToEncodedMemorySequence =
-          newEncodedCacheMultiplexToTranscodeSequence(mNetworkFetchProducer, /* isLocal */false);
+      mCommonNetworkFetchToEncodedMemorySequence = newEncodedCacheMultiplexToTranscodeSequence(
+          mProducerFactory.newNetworkFetchProducer(mNetworkFetcher));
       if (mResizeAndRotateEnabledForNetwork) {
         mCommonNetworkFetchToEncodedMemorySequence =
             newResizeAndRotateImagesSequence(mCommonNetworkFetchToEncodedMemorySequence);
@@ -354,7 +330,7 @@ public class ProducerSequenceFactory {
       Producer<CloseableReference<PooledByteBuffer>> nextProducer,
       boolean isLocal) {
     Producer<CloseableReference<PooledByteBuffer>> nextProducerAfterDecode =
-        newEncodedCacheMultiplexToTranscodeSequence(nextProducer, isLocal);
+        newEncodedCacheMultiplexToTranscodeSequence(nextProducer);
     if (isLocal) {
       nextProducerAfterDecode = newLocalTransformationsSequence(nextProducerAfterDecode);
     }
@@ -375,19 +351,15 @@ public class ProducerSequenceFactory {
   /**
    * encoded cache multiplex -> encoded cache -> (disk cache) -> (webp transcode)
    * @param nextProducer next producer in the sequence
-   * @param isLocal whether the image source is local or not
    * @return encoded cache multiplex to webp transcode sequence
    */
   private Producer<CloseableReference<PooledByteBuffer>>
       newEncodedCacheMultiplexToTranscodeSequence(
-          Producer<CloseableReference<PooledByteBuffer>> nextProducer,
-          boolean isLocal) {
+          Producer<CloseableReference<PooledByteBuffer>> nextProducer) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR2) {
       nextProducer = mProducerFactory.newWebpTranscodeProducer(nextProducer);
     }
-    if (!isLocal) {
-      nextProducer = mProducerFactory.newDiskCacheProducer(nextProducer);
-    }
+    nextProducer = mProducerFactory.newDiskCacheProducer(nextProducer);
     EncodedMemoryCacheProducer encodedMemoryCacheProducer =
         mProducerFactory.newEncodedMemoryCacheProducer(nextProducer);
     return mProducerFactory.newEncodedCacheKeyMultiplexProducer(encodedMemoryCacheProducer);
