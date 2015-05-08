@@ -37,7 +37,6 @@ import com.facebook.imagepipeline.animated.util.AnimatedDrawableUtil;
 import com.facebook.imagepipeline.bitmaps.PlatformBitmapFactory;
 import com.facebook.imagepipeline.cache.BitmapCountingMemoryCacheFactory;
 import com.facebook.imagepipeline.cache.BitmapMemoryCacheFactory;
-import com.facebook.imagepipeline.cache.BitmapMemoryCacheKey;
 import com.facebook.imagepipeline.cache.BufferedDiskCache;
 import com.facebook.imagepipeline.cache.CountingMemoryCache;
 import com.facebook.imagepipeline.cache.EncodedCountingMemoryCacheFactory;
@@ -79,7 +78,7 @@ public class ImagePipelineFactory {
   /** Shuts {@link ImagePipelineFactory} down. */
   public static void shutDown() {
     if (sInstance != null) {
-      sInstance.getBitmapMemoryCache().removeAll(AndroidPredicates.<BitmapMemoryCacheKey>True());
+      sInstance.getBitmapMemoryCache().removeAll(AndroidPredicates.<CacheKey>True());
       sInstance.getEncodedMemoryCache().removeAll(AndroidPredicates.<CacheKey>True());
       sInstance = null;
     }
@@ -88,12 +87,12 @@ public class ImagePipelineFactory {
   private final ImagePipelineConfig mConfig;
 
   private AnimatedDrawableFactory mAnimatedDrawableFactory;
-  private CountingMemoryCache<BitmapMemoryCacheKey, CloseableImage, Void>
+  private CountingMemoryCache<CacheKey, CloseableImage>
       mBitmapCountingMemoryCache;
-  private MemoryCache<BitmapMemoryCacheKey, CloseableImage, Void> mBitmapMemoryCache;
+  private MemoryCache<CacheKey, CloseableImage> mBitmapMemoryCache;
   private EmptyJpegGenerator mEmptyJpegGenerator;
-  private CountingMemoryCache<CacheKey, PooledByteBuffer, Void> mEncodedCountingMemoryCache;
-  private MemoryCache<CacheKey, PooledByteBuffer, Void> mEncodedMemoryCache;
+  private CountingMemoryCache<CacheKey, PooledByteBuffer> mEncodedCountingMemoryCache;
+  private MemoryCache<CacheKey, PooledByteBuffer> mEncodedMemoryCache;
   private BufferedDiskCache mMainBufferedDiskCache;
   private DiskStorageCache mMainDiskStorageCache;
   private ImagePipeline mImagePipeline;
@@ -106,10 +105,9 @@ public class ImagePipelineFactory {
     mConfig = Preconditions.checkNotNull(config);
   }
 
-  // TODO(5959048): these methods should be taken private
-  // We need them public for now so internal code can use them.
+  // We need some of these methods public for now so internal code can use them.
 
-  public CountingMemoryCache<BitmapMemoryCacheKey, CloseableImage, Void>
+  public CountingMemoryCache<CacheKey, CloseableImage>
       getBitmapCountingMemoryCache() {
     if (mBitmapCountingMemoryCache == null) {
       mBitmapCountingMemoryCache =
@@ -120,7 +118,7 @@ public class ImagePipelineFactory {
     return mBitmapCountingMemoryCache;
   }
 
-  public MemoryCache<BitmapMemoryCacheKey, CloseableImage, Void> getBitmapMemoryCache() {
+  public MemoryCache<CacheKey, CloseableImage> getBitmapMemoryCache() {
     if (mBitmapMemoryCache == null) {
       mBitmapMemoryCache =
           BitmapMemoryCacheFactory.get(
@@ -130,16 +128,7 @@ public class ImagePipelineFactory {
     return mBitmapMemoryCache;
   }
 
-  private EmptyJpegGenerator getEmptyJpegGenerator() {
-    if (mEmptyJpegGenerator == null) {
-      mEmptyJpegGenerator =
-          new EmptyJpegGenerator(
-              mConfig.getPoolFactory().getPooledByteBufferFactory());
-    }
-    return mEmptyJpegGenerator;
-  }
-
-  public CountingMemoryCache<CacheKey, PooledByteBuffer, Void> getEncodedCountingMemoryCache() {
+  public CountingMemoryCache<CacheKey, PooledByteBuffer> getEncodedCountingMemoryCache() {
     if (mEncodedCountingMemoryCache == null) {
       mEncodedCountingMemoryCache =
           EncodedCountingMemoryCacheFactory.get(
@@ -149,7 +138,7 @@ public class ImagePipelineFactory {
     return mEncodedCountingMemoryCache;
   }
 
-  public MemoryCache<CacheKey, PooledByteBuffer, Void> getEncodedMemoryCache() {
+  public MemoryCache<CacheKey, PooledByteBuffer> getEncodedMemoryCache() {
     if (mEncodedMemoryCache == null) {
       mEncodedMemoryCache =
           EncodedMemoryCacheFactory.get(
@@ -193,10 +182,6 @@ public class ImagePipelineFactory {
               mConfig.getCacheKeyFactory());
     }
     return mImagePipeline;
-  }
-
-  public PlatformBitmapFactory getPlatformBitmapFactory() {
-    return mConfig.getPlatformBitmapFactory();
   }
 
   private ProducerFactory getProducerFactory() {
